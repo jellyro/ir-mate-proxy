@@ -1,0 +1,21 @@
+# ESPHome
+.esphome/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# Secrets / local configs
+secrets.yaml
+secrets/
+*.local.yaml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

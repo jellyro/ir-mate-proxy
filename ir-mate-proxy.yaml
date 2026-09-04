@@ -1,0 +1,443 @@
+substitutions:
+  ir_tx_pin: GPIO3
+  ir_rx_pin: GPIO4
+  rgb_led_pin: GPIO7
+  touch_pin: GPIO5
+  vibration_pin: GPIO6
+  reset_button_pin: GPIO9
+  name: ir-mate-proxy
+  friendly_name: IR Mate Proxy
+
+
+esphome:
+  min_version: 2026.1.0
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: true
+  project:
+    name: jellyro.ir_mate_proxy
+    version: "1.0.0"
+  on_boot:
+    priority: 600
+    then:
+      - globals.set:
+          id: startup_complete
+          value: "false"
+      - script.execute: finish_startup
+
+
+esp32:
+  board: seeed_xiao_esp32c3
+  framework:
+    type: arduino
+
+
+logger:
+  level: INFO
+  logs:
+    remote.raw: WARN
+
+
+captive_portal:
+
+
+wifi:
+  id: wifi_component
+  power_save_mode: none
+  reboot_timeout: 15min
+  on_connect:
+    then:
+      - logger.log:
+          tag: wifi
+          level: INFO
+          format: "WiFi connected"
+  on_disconnect:
+    then:
+      - logger.log:
+          tag: wifi
+          level: WARN
+          format: "WiFi disconnected"
+  ap:
+
+
+remote_transmitter:
+  id: ir_tx
+  pin: ${ir_tx_pin}
+  carrier_duty_percent: 50%
+  non_blocking: true
+  rmt_symbols: 48
+
+
+remote_receiver:
+  id: ir_rx
+  pin:
+    number: ${ir_rx_pin}
+    inverted: true
+    mode:
+      input: true
+  filter: 50us
+  clock_resolution: 500000
+  idle: 65000us
+  rmt_symbols: 96
+  receive_symbols: 96
+
+
+infrared:
+  - platform: ir_rf_proxy
+    id: ir_proxy_transmitter
+    name: IR Transmitter
+    remote_transmitter_id: ir_tx
+
+  - platform: ir_rf_proxy
+    id: ir_proxy_receiver
+    name: IR Receiver
+    remote_receiver_id: ir_rx
+    receiver_frequency: 38kHz
+
+
+globals:
+  - id: startup_complete
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: reset_press_time
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+  - id: click_count
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: rgb_light
+    name: Status LED
+    pin: ${rgb_led_pin}
+    chipset: WS2812
+    num_leds: 1
+    channel_colors: GRB
+    rmt_symbols: 48
+    restore_mode: ALWAYS_OFF
+    disabled_by_default: true
+
+
+output:
+  - platform: gpio
+    id: vibration_motor
+    pin: ${vibration_pin}
+
+
+event:
+  - platform: template
+    id: touch_action
+    name: Touch Action
+    icon: mdi:gesture-tap
+    device_class: button
+    event_types:
+      - single
+      - double
+      - triple
+      - quad
+
+
+binary_sensor:
+  - platform: status
+    name: Status
+    entity_category: diagnostic
+
+  - platform: gpio
+    id: touch_input
+    name: Touch
+    internal: true  # Hide from Home Assistant; only used for click detection.
+    pin:
+      number: ${touch_pin}
+      mode:
+        input: true
+        pulldown: true  # Keep input LOW when not touched.
+    filters:
+      - delayed_on_off: 20ms  # Debounce touch transitions.
+
+    on_state:
+      - script.execute: haptic_touch  # Haptic tick on every touch.
+      - lambda: |-
+          // Touch sensor is in toggle mode: each state change = one touch.
+          id(click_count) += 1;
+          id(click_timeout).execute();
+
+  - platform: gpio
+    id: reset_button
+    name: Reset Button
+    pin:
+      number: ${reset_button_pin}
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - invert
+      - delayed_on_off: 50ms
+    entity_category: diagnostic
+    disabled_by_default: true
+
+    on_press:
+      - lambda: |-
+          id(reset_press_time) = millis();
+
+    on_release:
+      - lambda: |-
+          uint32_t duration = millis() - id(reset_press_time);
+          if (duration >= 10000) {
+            ESP_LOGI("reset", "Factory reset (held %lums)", duration);
+            id(vibrate_long).execute();
+            id(factory_reset_switch).turn_on();
+          } else {
+            ESP_LOGI("reset", "Restart (held %lums)", duration);
+            id(vibrate_short).execute();
+            ESP.restart();
+          }
+
+
+switch:
+  - platform: template
+    id: touch_haptics
+    name: Haptic Feedback
+    icon: mdi:vibrate
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: factory_reset
+    id: factory_reset_switch
+    name: Factory Reset
+    icon: mdi:restart-alert
+    entity_category: diagnostic
+    disabled_by_default: true
+
+
+script:
+  - id: finish_startup
+    mode: restart
+    then:
+      - delay: 3s
+      - globals.set:
+          id: startup_complete
+          value: "true"
+
+  - id: haptic_touch
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: touch_haptics
+          then:
+            - output.turn_on: vibration_motor
+            - delay: 50ms
+            - output.turn_off: vibration_motor
+
+  - id: click_timeout
+    mode: restart
+    then:
+      - delay: 350ms
+      - lambda: |-
+          int count = id(click_count);
+          id(click_count) = 0;
+          if (count == 1) {
+            ESP_LOGI("touch", "Touch: SINGLE");
+            id(touch_action).trigger("single");
+          } else if (count == 2) {
+            ESP_LOGI("touch", "Touch: DOUBLE");
+            id(touch_action).trigger("double");
+          } else if (count == 3) {
+            ESP_LOGI("touch", "Touch: TRIPLE");
+            id(touch_action).trigger("triple");
+          } else if (count >= 4) {
+            ESP_LOGI("touch", "Touch: QUAD");
+            id(touch_action).trigger("quad");
+          }
+
+  - id: vibrate_short
+    mode: restart
+    then:
+      - output.turn_on: vibration_motor
+      - delay: 60ms
+      - output.turn_off: vibration_motor
+
+  - id: vibrate_medium
+    mode: restart
+    then:
+      - output.turn_on: vibration_motor
+      - delay: 150ms
+      - output.turn_off: vibration_motor
+
+  - id: vibrate_long
+    mode: restart
+    then:
+      - output.turn_on: vibration_motor
+      - delay: 400ms
+      - output.turn_off: vibration_motor
+
+  - id: vibrate_double
+    mode: restart
+    then:
+      - output.turn_on: vibration_motor
+      - delay: 60ms
+      - output.turn_off: vibration_motor
+      - delay: 80ms
+      - output.turn_on: vibration_motor
+      - delay: 60ms
+      - output.turn_off: vibration_motor
+
+  - id: vibrate_triple
+    mode: restart
+    then:
+      - repeat:
+          count: 3
+          then:
+            - output.turn_on: vibration_motor
+            - delay: 50ms
+            - output.turn_off: vibration_motor
+            - delay: 70ms
+
+
+interval:
+  - interval: 300ms
+    then:
+      - lambda: |-
+          static bool blink_state = false;
+          static int previous_mode = -1;
+          int mode;
+
+          if (!id(startup_complete)) {
+            mode = 0;  // Startup: blinking blue.
+          } else if (id(wifi_component).is_connected()) {
+            mode = 1;  // Connected: off.
+          } else if (id(wifi_component).is_ap_active()) {
+            mode = 2;  // AP/fallback: solid orange.
+          } else {
+            mode = 3;  // Disconnected: solid red.
+          }
+
+          if (mode == 0) {
+            blink_state = !blink_state;
+
+            if (blink_state) {
+              auto call = id(rgb_light).turn_on();
+              call.set_rgb(0.0f, 0.0f, 1.0f);  // Blue.
+              call.set_brightness(0.25f);
+              call.set_transition_length(0);
+              call.perform();
+            } else {
+              auto call = id(rgb_light).turn_off();
+              call.set_transition_length(0);
+              call.perform();
+            }
+
+            previous_mode = mode;
+            return;
+          }
+
+          if (mode == previous_mode) {
+            return;
+          }
+
+          previous_mode = mode;
+
+          if (mode == 1) {
+            auto call = id(rgb_light).turn_off();
+            call.set_transition_length(0);
+            call.perform();
+            return;
+          }
+
+          auto call = id(rgb_light).turn_on();
+          if (mode == 2) {
+            call.set_rgb(1.0f, 0.5f, 0.0f);  // Orange.
+          } else {
+            call.set_rgb(1.0f, 0.0f, 0.0f);  // Red.
+          }
+          call.set_brightness(0.25f);
+          call.set_transition_length(0);
+          call.perform();
+
+
+sensor:
+  - platform: wifi_signal
+    id: wifi_signal_db
+    name: WiFi Signal
+    update_interval: 60s
+    entity_category: diagnostic
+    disabled_by_default: true
+
+  - platform: uptime
+    name: Uptime
+    update_interval: 60s
+    entity_category: diagnostic
+    disabled_by_default: true
+
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: IP Address
+      entity_category: diagnostic
+    ssid:
+      name: Connected SSID
+      entity_category: diagnostic
+    bssid:
+      name: WiFi BSSID
+      entity_category: diagnostic
+    mac_address:
+      name: WiFi MAC Address
+      entity_category: diagnostic
+
+
+button:
+  - platform: restart
+    name: Restart
+    entity_category: diagnostic
+
+  - platform: safe_mode
+    name: Restart in Safe Mode
+    entity_category: diagnostic
+
+  - platform: template
+    name: Vibrate Short
+    icon: mdi:vibrate
+    entity_category: diagnostic
+    disabled_by_default: true
+    on_press:
+      - script.execute: vibrate_short
+
+  - platform: template
+    name: Vibrate Medium
+    icon: mdi:vibrate
+    entity_category: diagnostic
+    disabled_by_default: true
+    on_press:
+      - script.execute: vibrate_medium
+
+  - platform: template
+    name: Vibrate Long
+    icon: mdi:vibrate
+    entity_category: diagnostic
+    disabled_by_default: true
+    on_press:
+      - script.execute: vibrate_long
+
+  - platform: template
+    name: Vibrate Double
+    icon: mdi:vibrate
+    entity_category: diagnostic
+    disabled_by_default: true
+    on_press:
+      - script.execute: vibrate_double
+
+  - platform: template
+    name: Vibrate Triple
+    icon: mdi:vibrate
+    entity_category: diagnostic
+    disabled_by_default: true
+    on_press:
+      - script.execute: vibrate_triple
