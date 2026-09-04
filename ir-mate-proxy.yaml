@@ -26,6 +26,11 @@ esphome:
       - script.execute: finish_startup
 
 
+dashboard_import:
+  package_import_url: github://jellyro/ir-mate-proxy/ir-mate-proxy.yaml@main
+  import_full_config: false
+
+
 esp32:
   board: seeed_xiao_esp32c3
   framework:
