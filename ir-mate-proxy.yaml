@@ -16,7 +16,7 @@ esphome:
   name_add_mac_suffix: true
   project:
     name: jellyro.ir_mate_proxy
-    version: "1.0.0"
+    version: "1.0.1"
   on_boot:
     priority: 600
     then:
