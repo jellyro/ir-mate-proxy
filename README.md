@@ -36,6 +36,9 @@ esphome:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  ap:
+    ssid: my_ir_proxy_ssid
+    password: !secret my_ir_proxy__ap_password
 
 ota:
   - platform: esphome
